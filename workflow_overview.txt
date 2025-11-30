@@ -1,0 +1,51 @@
+Hacker News AI Sentiment Workflow
+================================
+
+Recent Work (this session)
+--------------------------
+- Re-used `hacker_news_ai_posts.csv` + optional live comment fetch to keep only clearly AI-related threads.
+- Built `hacker_news_ai_threads_new.csv` / `hacker_news_ai_story_blobs.*` with lineage metadata for every comment.
+- Generated 50 LLM-ready payloads via `sentiment_preprocess.py`, capturing cleaned text, model/aspect hints, and the shared prompt/taxonomy.
+- Exercised `openrouter_sentiment_runner.py` with `--limit 3` as a smoke test, writing the first three annotated rows to `sentiment_llm_results.jsonl`.
+
+How the main files relate & when to run them
+-------------------------------------------
+1. script_no_pandas.py  (data shaping + optional comment fetch)
+   - Inputs: `hacker_news_ai_posts.csv` from BigQuery or `fetch_hn_ai_posts.py`.
+   - Purpose: filter to AI stories, (optionally) pull fresh comments, and emit thread-level CSV plus story-level JSON/CSV blobs.
+   - Typical command:
+       python script_no_pandas.py --input hacker_news_ai_posts.csv \
+           --fetch-comments --max-comments-per-story 50 --max-comment-depth 4 \
+           --threads-output hacker_news_ai_threads_new.csv
+   - Outputs consumed later: `hacker_news_ai_threads_new.csv` (comment rows) and `hacker_news_ai_story_blobs.json/csv` (story summaries).
+
+2. sentiment_preprocess.py  (LLM payload builder)
+   - Inputs: the thread CSV from step 1.
+   - Cleans text (HTML/code/emoji/URLs), normalizes, tags model references, injects aspect taxonomy + instructions.
+   - Typical command:
+       python sentiment_preprocess.py --input hacker_news_ai_threads_new.csv \
+           --jsonl-output sentiment_llm_payload.jsonl \
+           --csv-output sentiment_llm_payload.csv --max-records 50
+   - Outputs feed every downstream LLM call: JSONL/CSV payload files.
+
+3. openrouter_sentiment_runner.py  (LLM execution loop)
+   - Inputs: the JSONL payloads from step 2 and an OpenRouter API key file (`key`).
+   - Performs two reasoning-enabled calls per row (initial + "Are you sure?" follow-up) and stores both answers.
+   - Typical command:
+       python openrouter_sentiment_runner.py --input sentiment_llm_payload.jsonl \
+           --output sentiment_llm_results.jsonl --model x-ai/grok-4.1-fast:free \
+           --limit 50 --sleep 1.0
+   - Output: `sentiment_llm_results.jsonl`, one record per processed payload with initial/final content and encrypted reasoning blobs, ready for analysis.
+
+Recommended run order
+---------------------
+(0) Optional: `fetch_hn_ai_posts.py` to pull the latest Hacker News stories directly from BigQuery if `hacker_news_ai_posts.csv` is outdated.
+(1) `script_no_pandas.py` to curate AI-centric threads and, if desired, top up comments.
+(2) `sentiment_preprocess.py` to convert those rows into deterministic JSONL/CSV payloads.
+(3) `openrouter_sentiment_runner.py` to score the payloads via OpenRouter and append results to `sentiment_llm_results.jsonl`.
+
+Notes & Next Steps
+------------------
+- Only three payloads were sent during the dry run; re-run step (3) with a higher `--limit` (or chunked batches) to cover the remaining 47 payloads.
+- `hacker_news_ai_story_blobs.csv` exposes `comment_count_in_sample`; filter to stories with >=10 sampled comments before preprocessing if you want a stricter coverage guarantee per root story.
+- Every JSON artifact is newline-delimited for easy incremental appends; prefer `>>` append mode in future batches to retain prior runs.
