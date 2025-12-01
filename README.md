@@ -54,9 +54,10 @@ python openrouter_sentiment_runner.py \
   --limit 0          # process every payload for the selected stories
 ```
 Key features:
-- Stories are processed sequentially, and you get complete batches per root story.
+- Each API call now scores an entire story chunk (up to `--per-story-batch-size` comments) and returns per-comment JSON in one response, which keeps detail but slashes the number of OpenRouter requests.
+- Stories are still processed sequentially so you can throttle/limit deterministically.
 - `--append-output` lets you accumulate multiple runs into the same JSONL file.
-- Use `--story-ids` or `--max-stories` to explicitly choose which stories to score.
+- Use `--story-ids` or `--max-stories` to explicitly choose which stories to score or to debug with a smaller subset.
 
 ### 4. Visualize results (`sentiment_charts.py`)
 ```bash
