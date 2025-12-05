@@ -17,7 +17,7 @@ import argparse
 import importlib
 import json
 import re
-from collections import defaultdict, deque
+from collections import defaultdict
 from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
@@ -113,6 +113,8 @@ def clean_text(value: object) -> str:
     if value is None:
         return ""
     text = unescape(str(value))
+    if text.strip().lower() == "nan":
+        return ""
     text = TAG_RE.sub(" ", text)
     return " ".join(text.split()).strip()
 
@@ -203,78 +205,6 @@ def load_raw_posts(csv_path: str | Path):
     return df
 
 
-def augment_with_comments(df, max_depth: int | None, max_comments: int | None, allowed_story_ids: List[int] | None = None):
-    story_df = df[df["type"].fillna("").astype(str).str.lower() == "story"]
-    if allowed_story_ids:
-        story_set = set(int(sid) for sid in allowed_story_ids)
-        story_df = story_df[story_df["id"].isin(story_set)]
-    if story_df.empty:
-        print("No stories found; skipping comment fetch.")
-        return df
-
-    existing_ids = set(df["id"].dropna().astype(int))
-    new_records = []
-    cache = {}
-
-    for _, story in story_df.iterrows():
-        story_id = story.get("id")
-        if pd.isna(story_id):
-            continue
-        story_id = int(story_id)
-        story_data = fetch_hn_item(story_id, cache) or {}
-        initial_kids = story_data.get("kids") or []
-        queue = deque((kid, 1) for kid in initial_kids)
-        fetched = 0
-        visited = set()
-
-        while queue:
-            comment_id, depth = queue.popleft()
-            if comment_id in visited:
-                continue
-            visited.add(comment_id)
-            comment = fetch_hn_item(comment_id, cache)
-            if not comment or comment.get("type") != "comment":
-                continue
-            if comment_id in existing_ids:
-                continue
-
-            new_records.append({
-                "id": comment.get("id"),
-                "title": comment.get("title"),
-                "text": comment.get("text"),
-                "score": comment.get("score"),
-                "author": comment.get("by"),
-                "time": comment.get("time"),
-                "type": comment.get("type"),
-                "url": comment.get("url"),
-                "parent": comment.get("parent"),
-                "descendants": comment.get("descendants"),
-                "deleted": comment.get("deleted"),
-                "dead": comment.get("dead"),
-                "poll": comment.get("poll"),
-                "kids": comment.get("kids"),
-                "parts": comment.get("parts"),
-            })
-
-            existing_ids.add(comment_id)
-            fetched += 1
-            if max_comments and fetched >= max_comments:
-                break
-
-            if max_depth is None or depth < max_depth:
-                for kid in comment.get("kids") or []:
-                    queue.append((kid, depth + 1))
-
-        print(f"Fetched {fetched} comments for story {story_id}")
-
-    if new_records:
-        print(f"Appending {len(new_records)} fetched comments to dataset")
-        df = pd.concat([df, pd.DataFrame(new_records)], ignore_index=True)
-    else:
-        print("No new comments fetched.")
-    return ensure_columns(df)
-
-
 def prepare_sentiment_rows(raw_df, allowed_story_ids: List[int] | None = None):
     if raw_df is None or raw_df.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -319,6 +249,37 @@ def prepare_sentiment_rows(raw_df, allowed_story_ids: List[int] | None = None):
         else:
             text_payload = clean_text(item.get("text"))
 
+        parent_raw = item.get("parent")
+        try:
+            parent_id = int(parent_raw) if parent_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            parent_id = None
+        parent_item = get_item(parent_id) if parent_id is not None else None
+        parent_type = (parent_item.get("type") or "") if parent_item else ""
+        if parent_item:
+            parent_author = parent_item.get("author") or parent_item.get("by") or ""
+        else:
+            parent_author = ""
+        if parent_item:
+            if parent_type == "story":
+                parent_text_clean = " ".join(
+                    filter(
+                        None,
+                        [clean_text(parent_item.get("title")), clean_text(parent_item.get("text"))],
+                    )
+                )
+            else:
+                parent_text_clean = clean_text(parent_item.get("text"))
+        else:
+            parent_text_clean = ""
+
+        if node_type == "story":
+            conversation_role = "story"
+        elif depth <= 1:
+            conversation_role = "direct_reply"
+        else:
+            conversation_role = "thread_reply"
+
         row = {
             "root_story_id": story_id,
             "root_story_title": story_metadata.get(story_id, {}).get("title", "") if story_id else "",
@@ -326,17 +287,22 @@ def prepare_sentiment_rows(raw_df, allowed_story_ids: List[int] | None = None):
             "root_story_time_iso": story_metadata.get(story_id, {}).get("time_iso", "") if story_id else "",
             "root_story_score": story_metadata.get(story_id, {}).get("score", "") if story_id else "",
             "root_story_url": story_metadata.get(story_id, {}).get("url", "") if story_id else "",
+            "root_story_text_clean": story_metadata.get(story_id, {}).get("story_text_clean", "") if story_id else "",
             "node_id": item_id,
             "node_type": node_type,
             "node_author": item.get("author") or item.get("by") or "",
             "node_time_iso": format_timestamp(item.get("time")),
             "node_score": item.get("score", 0) or 0,
-            "parent_id": item.get("parent"),
+            "parent_id": parent_id,
+            "parent_author": parent_author,
+            "parent_text_clean": parent_text_clean,
+            "parent_type": parent_type,
             "comment_depth": depth if node_type != "story" else 0,
             "lineage_to_story": " -> ".join(
                 str(x) for x in (list(reversed(lineage)) + [item_id])
             ) if lineage else str(item_id),
             "text_clean": text_payload,
+            "conversation_role": conversation_role,
         }
 
         thread_rows.append(row)
@@ -500,23 +466,6 @@ def parse_args() -> argparse.Namespace:
         help="Optional path to persist the raw DataFrame as JSON",
     )
     parser.add_argument(
-        "--fetch-comments",
-        action="store_true",
-        help="Fetch comment threads for each story via the Hacker News API",
-    )
-    parser.add_argument(
-        "--max-comment-depth",
-        type=int,
-        default=6,
-        help="Depth limit when fetching comments (default: 6)",
-    )
-    parser.add_argument(
-        "--max-comments-per-story",
-        type=int,
-        default=500,
-        help="Maximum comments to fetch per story (default: 500)",
-    )
-    parser.add_argument(
         "--max-stories",
         type=int,
         default=None,
@@ -571,13 +520,6 @@ def main() -> None:
         )
         df_raw = filter_dataframe_to_story_ids(df_raw, selected_story_ids)
 
-    if args.fetch_comments:
-        df_raw = augment_with_comments(
-            df_raw,
-            max_depth=args.max_comment_depth,
-            max_comments=args.max_comments_per_story,
-            allowed_story_ids=selected_story_ids,
-        )
     thread_df, story_df = prepare_sentiment_rows(df_raw, allowed_story_ids=selected_story_ids)
     analyze_data(df_raw, thread_df, story_df)
 
