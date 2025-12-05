@@ -1,97 +1,166 @@
 # Hacker News AI Sentiment Workflow
 
-This project builds a compact, reproducible pipeline that:
+This repository contains a reproducible workflow for analyzing how the Hacker News community reacts to AI-related posts:
 
-1. Pulls a BigQuery export of AI-related Hacker News stories (`hacker_news_ai_posts.csv`).
-2. Rehydrates each selected story with capped Hacker News comments.
-3. Prepares model-ready JSONL payloads with sentiment/aspect prompts.
-4. Calls OpenRouter in reasoning mode, one story at a time, while preserving batches.
-5. Visualizes the resulting sentiments/aspects with matplotlib charts.
+1. Query BigQuery for AI-tagged stories/comments.
+2. Rehydrate and clean the raw threads.
+3. Build per-comment JSONL payloads with consistent prompts.
+4. Call OpenRouter (or any OpenAI-compatible API) for aspect-aware sentiment labels.
+5. Chart the resulting sentiments/aspects.
 
-The current default run focuses on **10 stories max** (see `--max-stories`) with up to **50 comments per story**, keeping experiments inexpensive.
+CSV artifacts are now **intentionally untracked** to keep the repo lean—run the steps below to regenerate them locally whenever you need fresh data.
 
 ---
 
-## Step-by-step workflow
+## Requirements
 
-### 0. (Optional) Refresh the base CSV
-Use `fetch_hn_ai_posts.py` or rerun the BigQuery export to regenerate `hacker_news_ai_posts.csv` when you want newer stories.
+| Tool | Why it is needed |
+| --- | --- |
+| Python 3.10+ | All scripts are CLI utilities written for modern Python. |
+| `pip install pandas requests matplotlib google-cloud-bigquery` | Core libraries across the pipeline (pandas for preprocessing, requests for OpenRouter calls, matplotlib for charts, BigQuery client for the optional fetch step). |
+| Google Cloud credentials | Required only when running `fetch_hn_ai_posts.py` (BigQuery access). |
+| OpenRouter API key | Save your token in a file named `key` (default path used by the runner + probes). |
 
-### 1. Curate stories + fetch comments (`script_no_pandas.py`)
+Feel free to create a virtual environment and install the dependencies in one go:
+
+```bash
+python -m venv .venv
+. .venv/Scripts/activate        # Windows PowerShell: .\.venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install pandas requests matplotlib google-cloud-bigquery
+```
+
+---
+
+## End-to-end workflow
+
+Each script lives at the repo root. All commands below assume you are inside `AI_lab_hacker_news/`.
+
+### 1. (Optional) Refresh the raw export – `fetch_hn_ai_posts.py`
+
+Pull a fresh sample of AI discussions from the public Hacker News BigQuery dataset:
+
+```bash
+python fetch_hn_ai_posts.py \
+  --project ai-lab-479123 \
+  --limit 1000 \
+  --csv-output hacker_news_ai_posts.csv \
+  --json-output hacker_news_ai_posts.json \
+  --comment-story-limit 10 \
+  --comment-depth 6 \
+  --comments-per-story 500
+```
+
+This step produces **two files** (CSV + JSON). They are gitignored; keep them locally or upload to cloud storage if you want an archive.
+
+### 2. Build thread-aware rows – `script_no_pandas.py`
+
 ```bash
 python script_no_pandas.py \
   --input hacker_news_ai_posts.csv \
-  --fetch-comments --max-comments-per-story 50 --max-comment-depth 4 \
+  --fetch-comments \
+  --max-comments-per-story 50 \
+  --max-comment-depth 4 \
   --max-stories 10 \
-  --threads-output hacker_news_ai_threads_new.csv \
-  --stories-output hacker_news_ai_story_blobs.json \
-  --stories-csv-output hacker_news_ai_story_blobs.csv
+  --threads-output hacker_news_ai_threads.csv \
+  --stories-output hacker_news_ai_story_blobs.json
 ```
-**Outputs**
-- `hacker_news_ai_threads_new.csv`: flattened story/comment rows (one row per node).
-- `hacker_news_ai_story_blobs.(json|csv)`: story summaries with `comment_count_in_sample`.
 
-### 2. Build LLM payloads (`sentiment_preprocess.py`)
+Outputs:
+
+- `hacker_news_ai_threads.csv` – every story/comment node with lineage, cleaned text, and parent metadata.
+- `hacker_news_ai_story_blobs.json` – per-story metadata + concatenated comment blobs for document-level work.
+
+### 3. Build LLM payloads – `sentiment_preprocess.py`
+
 ```bash
 python sentiment_preprocess.py \
-  --input hacker_news_ai_threads_new.csv \
+  --input hacker_news_ai_threads.csv \
   --jsonl-output sentiment_llm_payload.jsonl \
-  --csv-output sentiment_llm_payload.csv \
-  --max-records 500   # shrink further if desired
+  --output-format jsonl \
+  --max-records 500
 ```
-**Outputs**
-- `sentiment_llm_payload.jsonl` (primary source for LLM calls).
-- `sentiment_llm_payload.csv` (audit/debug mirror).
 
-### 3. Run OpenRouter with per-story batching (`openrouter_sentiment_runner.py`)
+Use `--output-format csv` or `--output-format both` if you truly need a CSV mirror. Default is JSONL-only to avoid duplicate artifacts.
+
+### 4. Smoke-test a single payload – `single_llm_probe.py`
+
+```bash
+python single_llm_probe.py \
+  --payload-index 0 \
+  --model openrouter/auto \
+  --input sentiment_llm_payload.jsonl \
+  --api-key-path key
+```
+
+This prints the OpenRouter JSON reply plus the elapsed time so you can verify prompts or latency before batch runs.
+
+### 5. Batch scoring with story chunks – `openrouter_sentiment_runner.py`
+
 ```bash
 python openrouter_sentiment_runner.py \
   --input sentiment_llm_payload.jsonl \
   --output sentiment_llm_results.jsonl \
+  --model openrouter/auto \
   --per-story-batch-size 50 \
   --append-output \
   --sleep 1.0 \
-  --limit 0          # process every payload for the selected stories
+  --story-ids 40345775 \
+  --limit 0
 ```
-Key features:
-- Each API call now scores an entire story chunk (up to `--per-story-batch-size` comments) and returns per-comment JSON in one response, which keeps detail but slashes the number of OpenRouter requests.
-- Stories are still processed sequentially so you can throttle/limit deterministically.
-- `--append-output` lets you accumulate multiple runs into the same JSONL file.
-- Use `--story-ids` or `--max-stories` to explicitly choose which stories to score or to debug with a smaller subset.
 
-### 4. Visualize results (`sentiment_charts.py`)
+Tips:
+
+- `--story-ids` lets you re-run or debug specific threads without re-scoring everything.
+- `--append-output` keeps existing JSONL rows and appends new results.
+- Each API call bundles every payload for the story (or chunk) to save on request count while still saving per-comment outputs.
+
+### 6. Visualize results – `sentiment_charts.py`
+
 ```bash
 python sentiment_charts.py \
   --input sentiment_llm_results.jsonl \
   --output-dir charts \
   --top-aspects 10
 ```
-**Outputs** (PNG charts)
-- `charts/sentiment_distribution.png`
-- `charts/top_aspects.png`
+
+Generates `charts/sentiment_distribution.png` and `charts/top_aspects.png` (folder auto-created).
 
 ---
 
-## Data + artifact index
-| File | Format | What it represents |
-| --- | --- | --- |
-| `hacker_news_ai_posts.csv` | CSV | Base BigQuery export of AI-tagged stories with ids, titles, scores, authors, timestamps, and url metadata. |
-| `hacker_news_ai_posts.json` | JSON | Same story subset as above but stored row-per-line for ad-hoc inspection or rehydration utilities. |
-| `hacker_news_ai_threads.csv` | CSV | Legacy flat thread dump from earlier runs; kept only for historical comparison/testing. |
-| `hacker_news_ai_threads_new.csv` | CSV | Current canonical flattened tree where each row is a story/comment node enriched with lineage fields, depth, and cleaned text. |
-| `hacker_news_ai_story_blobs.json` | JSON | Story-level summaries (one JSON object per story) that include metadata plus `comment_count_in_sample` and lightweight comment excerpts. |
-| `hacker_news_ai_story_blobs.csv` | CSV | Tabular view of the same summaries for spreadsheet analysis or filters (e.g., require ≥10 sampled comments). |
-| `sentiment_llm_payload.jsonl` | JSONL | Primary model-ready payloads generated from the thread CSV; each line carries prompt text, aspect hints, and identifiers. |
-| `sentiment_llm_payload.csv` | CSV | Audit-friendly mirror of the payload data so you can sort/filter without a JSONL viewer. |
-| `sentiment_llm_results.jsonl` | JSONL | Raw OpenRouter outputs capturing both initial and "are you sure" answers plus reasoning tokens per payload. |
-| `charts/sentiment_distribution.png` | PNG | Visualization of the share of positive/neutral/negative sentiments across all processed payloads. |
-| `charts/top_aspects.png` | PNG | Bar chart of the most commonly detected aspects/topics with their sentiment lean. |
+## Generated artifacts (gitignored)
+
+| Path | Description |
+| --- | --- |
+| `hacker_news_ai_posts.(csv|json)` | Raw BigQuery export and newline-delimited JSON mirror. |
+| `hacker_news_ai_threads.csv` | Flattened story/comment rows used for downstream processing. |
+| `hacker_news_ai_story_blobs.json` | Story-level rollups (title + combined comments). |
+| `sentiment_llm_payload.jsonl` | Primary payload file consumed by both the runner and probe. |
+| `sentiment_llm_results.jsonl` | OpenRouter responses (per-comment JSON). |
+| `charts/*.png` | Visual summaries created by `sentiment_charts.py`. |
+
+Delete and regenerate these at any time; the scripts are deterministic when fed the same upstream data.
 
 ---
 
-## Tips & maintenance
-- Keep `key` (OpenRouter API token) out of version control.
-- When re-running step 3, use `--append-output` and consider `--story-ids` to avoid re-charging already-processed stories.
-- If a Hacker News API call fails mid-fetch, simply rerun step 1; the script will continue fetching remaining stories.
-- For debugging or quick tests, reduce `--max-records` (step 2) or `--per-story-batch-size` (step 3).
-- After each full pass, re-run `sentiment_charts.py` to update the visual dashboards.
+## Operational notes
+
+- Store your OpenRouter key in `key` (or pass `--api-key-path`). Never commit it.
+- If a fetch step aborts mid-run, simply re-run the script; deduplication is handled for you.
+- Use `--max-records` in `sentiment_preprocess.py` and `--story-ids`/`--limit` in the runner when experimenting.
+- The repo no longer ships CSV samples—this keeps Git history small and encourages fetching the freshest data before each analysis.
+
+---
+
+## Publishing to GitHub
+
+After regenerating artifacts locally and verifying the steps above, commit the code changes (not the generated CSV/JSONL files) and push:
+
+```bash
+git status
+git add README.md sentiment_preprocess.py
+git commit -m "Document workflow and thin CSV artifacts"
+git push origin main
+```
+
+Ensure your gitignore covers data outputs if you decide to change filenames.

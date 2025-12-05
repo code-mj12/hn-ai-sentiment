@@ -95,6 +95,19 @@ class Record:
     context: Dict[str, str]
 
 
+def safe_text(value: object) -> str:
+    """Return a clean string, collapsing NaN/None to empty."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except TypeError:
+        # Non-scalar types are fine; fall through to string conversion
+        pass
+    return str(value)
+
+
 def strip_code(text: str) -> str:
     return CODE_BLOCK_RE.sub(" ", text)
 
@@ -144,8 +157,10 @@ def heuristic_aspects(text: str) -> List[str]:
 
 
 def build_record(row: pd.Series) -> Record:
-    text_source = row.get("text_clean") or row.get("text") or ""
-    cleaned = clean_text(str(text_source))
+    text_source = safe_text(row.get("text_clean"))
+    if not text_source:
+        text_source = safe_text(row.get("text"))
+    cleaned = clean_text(text_source)
     normalized = normalize_text(cleaned)
     node_id = row.get("node_id")
     root_story_id = row.get("root_story_id")
@@ -161,6 +176,17 @@ def build_record(row: pd.Series) -> Record:
         depth_int = int(row.get("comment_depth") or 0)
     except (TypeError, ValueError):
         depth_int = 0
+    parent_raw = row.get("parent_id")
+    try:
+        parent_id_int = int(parent_raw) if parent_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        parent_id_int = None
+
+    conversation_role = safe_text(row.get("conversation_role")) or (
+        "story"
+        if (row.get("node_type") or "").lower() == "story"
+        else ("direct_reply" if depth_int <= 1 else "thread_reply")
+    )
 
     return Record(
         node_id=node_id_int,
@@ -172,11 +198,18 @@ def build_record(row: pd.Series) -> Record:
         model_tags=detect_model_tags(cleaned),
         aspect_hints=heuristic_aspects(cleaned),
         context={
-            "root_title": row.get("root_story_title") or "",
-            "root_author": row.get("root_story_author") or "",
-            "root_url": row.get("root_story_url") or "",
-            "node_author": row.get("node_author") or "",
-            "node_time": row.get("node_time_iso") or "",
+            "root_title": safe_text(row.get("root_story_title")),
+            "root_author": safe_text(row.get("root_story_author")),
+            "root_url": safe_text(row.get("root_story_url")),
+            "root_text": safe_text(row.get("root_story_text_clean")),
+            "node_author": safe_text(row.get("node_author")),
+            "node_time": safe_text(row.get("node_time_iso")),
+            "parent_id": parent_id_int,
+            "parent_author": safe_text(row.get("parent_author")),
+            "parent_text": safe_text(row.get("parent_text_clean")),
+            "parent_type": safe_text(row.get("parent_type")),
+            "lineage_to_story": safe_text(row.get("lineage_to_story")),
+            "conversation_role": conversation_role,
         },
     )
 
@@ -202,6 +235,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", default=DEFAULT_INPUT, help="Thread CSV produced by script_no_pandas")
     parser.add_argument("--jsonl-output", default=DEFAULT_JSONL, help="Path for JSONL payload")
     parser.add_argument("--csv-output", default=DEFAULT_CSV, help="Path for optional CSV mirror")
+    parser.add_argument(
+        "--output-format",
+        choices=["jsonl", "csv", "both"],
+        default="jsonl",
+        help="Choose which artifacts to emit (default: jsonl only)",
+    )
     parser.add_argument(
         "--max-records",
         type=int,
@@ -272,11 +311,23 @@ def main() -> None:
         payload = make_llm_payload(record)
         payloads.append(payload)
 
-    jsonl_path = Path(args.jsonl_output)
-    save_jsonl(payloads, jsonl_path)
+    output_format = args.output_format
 
-    if args.csv_output:
+    if output_format in ("jsonl", "both"):
+        jsonl_path = Path(args.jsonl_output)
+        save_jsonl(payloads, jsonl_path)
+    else:
+        print("Skipping JSONL output (--output-format=csv)")
+
+    if output_format in ("csv", "both") and args.csv_output:
         save_csv(payloads, Path(args.csv_output))
+    elif output_format == "csv" and not args.csv_output:
+        raise ValueError("--output-format=csv requires --csv-output path")
+    elif output_format == "both" and not args.csv_output:
+        print("CSV path not provided; skipping CSV output despite --output-format=both")
+    else:
+        if output_format == "jsonl" and args.csv_output:
+            print("Skipping CSV output (--output-format=jsonl)")
 
     print("\nPipeline complete. Use each JSONL row as the message payload for GPT-4, Claude, LLaMA, etc.")
     print("Each payload already references the taxonomy and includes heuristic aspect hints for active learning.")
