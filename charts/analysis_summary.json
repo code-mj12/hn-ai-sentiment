@@ -1,0 +1,130 @@
+{
+  "comments_scored": 448,
+  "unique_stories": 9,
+  "unique_root_stories": 9,
+  "sentiment_counts": {
+    "negative": 143,
+    "neutral": 106,
+    "positive": 136,
+    "mixed": 63
+  },
+  "top_aspects": [
+    [
+      "usability_ux",
+      164
+    ],
+    [
+      "regulation_policy",
+      143
+    ],
+    [
+      "accuracy_reliability",
+      86
+    ],
+    [
+      "business_model",
+      67
+    ],
+    [
+      "cost_price",
+      67
+    ],
+    [
+      "performance_speed",
+      58
+    ],
+    [
+      "ethics",
+      48
+    ],
+    [
+      "privacy",
+      35
+    ],
+    [
+      "community_tone",
+      33
+    ],
+    [
+      "other",
+      33
+    ]
+  ],
+  "avg_aspects_per_comment": 1.6629464285714286,
+  "story_links": [
+    {
+      "story_id": 40345775,
+      "url": "https://news.ycombinator.com/item?id=40345775"
+    },
+    {
+      "story_id": 40447431,
+      "url": "https://news.ycombinator.com/item?id=40447431"
+    },
+    {
+      "story_id": 41046773,
+      "url": "https://news.ycombinator.com/item?id=41046773"
+    },
+    {
+      "story_id": 42473321,
+      "url": "https://news.ycombinator.com/item?id=42473321"
+    },
+    {
+      "story_id": 44163063,
+      "url": "https://news.ycombinator.com/item?id=44163063"
+    },
+    {
+      "story_id": 44226145,
+      "url": "https://news.ycombinator.com/item?id=44226145"
+    },
+    {
+      "story_id": 44567857,
+      "url": "https://news.ycombinator.com/item?id=44567857"
+    },
+    {
+      "story_id": 44800746,
+      "url": "https://news.ycombinator.com/item?id=44800746"
+    },
+    {
+      "story_id": 44826997,
+      "url": "https://news.ycombinator.com/item?id=44826997"
+    }
+  ],
+  "root_story_links": [
+    {
+      "root_story_id": 40345775,
+      "url": "https://news.ycombinator.com/item?id=40345775"
+    },
+    {
+      "root_story_id": 40447431,
+      "url": "https://news.ycombinator.com/item?id=40447431"
+    },
+    {
+      "root_story_id": 41046773,
+      "url": "https://news.ycombinator.com/item?id=41046773"
+    },
+    {
+      "root_story_id": 42473321,
+      "url": "https://news.ycombinator.com/item?id=42473321"
+    },
+    {
+      "root_story_id": 44163063,
+      "url": "https://news.ycombinator.com/item?id=44163063"
+    },
+    {
+      "root_story_id": 44226145,
+      "url": "https://news.ycombinator.com/item?id=44226145"
+    },
+    {
+      "root_story_id": 44567857,
+      "url": "https://news.ycombinator.com/item?id=44567857"
+    },
+    {
+      "root_story_id": 44800746,
+      "url": "https://news.ycombinator.com/item?id=44800746"
+    },
+    {
+      "root_story_id": 44826997,
+      "url": "https://news.ycombinator.com/item?id=44826997"
+    }
+  ]
+}

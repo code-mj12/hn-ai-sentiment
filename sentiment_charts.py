@@ -11,10 +11,14 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
+import numpy as np
+
+HN_ITEM_URL = "https://news.ycombinator.com/item?id={id}"
 
 DEFAULT_INPUT = "sentiment_llm_results.jsonl"
 DEFAULT_OUTPUT_DIR = "charts"
@@ -41,6 +45,12 @@ def parse_model_json(raw: Optional[str]) -> Optional[Dict]:
             return None
 
 
+def build_story_link(item_id: Optional[int]) -> Optional[str]:
+    if item_id is None:
+        return None
+    return HN_ITEM_URL.format(id=item_id)
+
+
 def load_sentiment_payloads(path: Path) -> List[Dict]:
     payloads: List[Dict] = []
     if not path.exists():
@@ -53,16 +63,31 @@ def load_sentiment_payloads(path: Path) -> List[Dict]:
             parsed = parse_model_json(record.get("final_response") or record.get("initial_response"))
             if parsed is None:
                 continue
+            parsed["root_story_id"] = record.get("root_story_id")
+            parsed["story_id"] = record.get("story_id")
+            parsed["story_link"] = build_story_link(record.get("story_id") or record.get("root_story_id"))
+            parsed["comment_id"] = record.get("id")
             payloads.append(parsed)
     if not payloads:
         raise ValueError(f"No parsable sentiment payloads were found in {path}")
     return payloads
 
 
-def aggregate(payloads: List[Dict]):
-    sentiment_counts = Counter()
-    aspect_counts = Counter()
+@dataclass
+class AggregationResult:
+    sentiment_counts: Counter
+    aspect_counts: Counter
+    aspect_sentiment_counts: Dict[str, Counter]
+    confidence_by_sentiment: Dict[str, List[float]]
+    confidence_by_aspect: Dict[str, List[float]]
+
+
+def aggregate(payloads: List[Dict]) -> AggregationResult:
+    sentiment_counts: Counter = Counter()
+    aspect_counts: Counter = Counter()
     aspect_sentiment_counts: Dict[str, Counter] = defaultdict(Counter)
+    confidence_by_sentiment: Dict[str, List[float]] = defaultdict(list)
+    confidence_by_aspect: Dict[str, List[float]] = defaultdict(list)
 
     for payload in payloads:
         sentiment = (payload.get("sentiment") or "").strip().lower()
@@ -70,14 +95,55 @@ def aggregate(payloads: List[Dict]):
             sentiment_counts[sentiment] += 1
         for aspect in payload.get("aspects", []) or []:
             aspect_key = (aspect.get("aspect") or "").strip()
-            if not aspect_key:
+            if not aspect_key or not aspect.get("present"):
                 continue
-            if aspect.get("present"):
-                aspect_counts[aspect_key] += 1
-                aspect_sentiment = (aspect.get("sentiment") or "").strip().lower()
-                if aspect_sentiment:
-                    aspect_sentiment_counts[aspect_key][aspect_sentiment] += 1
-    return sentiment_counts, aspect_counts, aspect_sentiment_counts
+            aspect_counts[aspect_key] += 1
+            aspect_sentiment = (aspect.get("sentiment") or "").strip().lower()
+            if aspect_sentiment:
+                aspect_sentiment_counts[aspect_key][aspect_sentiment] += 1
+                confidence = aspect.get("confidence")
+                if isinstance(confidence, (int, float)):
+                    confidence_by_sentiment[aspect_sentiment].append(confidence)
+                    confidence_by_aspect[aspect_key].append(confidence)
+
+    return AggregationResult(
+        sentiment_counts=sentiment_counts,
+        aspect_counts=aspect_counts,
+        aspect_sentiment_counts=aspect_sentiment_counts,
+        confidence_by_sentiment=confidence_by_sentiment,
+        confidence_by_aspect=confidence_by_aspect,
+    )
+
+
+def build_summary(payloads: List[Dict], agg: AggregationResult, top_aspects: int) -> Dict:
+    unique_story_ids = {payload.get("story_id") for payload in payloads if payload.get("story_id")}
+    unique_root_ids = {payload.get("root_story_id") for payload in payloads if payload.get("root_story_id")}
+    total_comments = len(payloads)
+    total_aspect_mentions = sum(agg.aspect_counts.values())
+
+    story_links = []
+    for story_id in sorted(unique_story_ids):
+        link = build_story_link(story_id)
+        if link:
+            story_links.append({"story_id": story_id, "url": link})
+
+    root_story_links = []
+    for root_id in sorted(unique_root_ids):
+        link = build_story_link(root_id)
+        if link:
+            root_story_links.append({"root_story_id": root_id, "url": link})
+
+    summary = {
+        "comments_scored": total_comments,
+        "unique_stories": len(unique_story_ids),
+        "unique_root_stories": len(unique_root_ids),
+        "sentiment_counts": dict(agg.sentiment_counts),
+        "top_aspects": agg.aspect_counts.most_common(top_aspects),
+        "avg_aspects_per_comment": (total_aspect_mentions / total_comments) if total_comments else 0,
+        "story_links": story_links,
+        "root_story_links": root_story_links,
+    }
+    return summary
 
 
 def plot_sentiment_distribution(counter: Counter, output_dir: Path, dpi: int) -> Optional[Path]:
@@ -92,7 +158,7 @@ def plot_sentiment_distribution(counter: Counter, output_dir: Path, dpi: int) ->
     plt.title("Sentiment distribution")
     plt.ylabel("Count")
     plt.grid(axis="y", linestyle="--", alpha=0.3)
-    for bar, value in zip(bars, values, strict=False):
+    for bar, value in zip(bars, values):
         plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), str(value), ha="center", va="bottom")
 
     output_path = output_dir / "sentiment_distribution.png"
@@ -117,7 +183,7 @@ def plot_top_aspects(counter: Counter, output_dir: Path, top_n: int, dpi: int) -
     plt.xlabel("Count")
     plt.title(f"Top {len(labels)} aspects (present=true)")
     plt.grid(axis="x", linestyle="--", alpha=0.3)
-    for bar, value in zip(bars, values, strict=False):
+    for bar, value in zip(bars, values):
         plt.text(bar.get_width(), bar.get_y() + bar.get_height() / 2, str(value), va="center", ha="left")
 
     output_path = output_dir / "top_aspects.png"
@@ -127,12 +193,109 @@ def plot_top_aspects(counter: Counter, output_dir: Path, top_n: int, dpi: int) -
     return output_path
 
 
+def plot_aspect_sentiment_mix(
+    aspect_counts: Counter,
+    aspect_sentiment_counts: Dict[str, Counter],
+    output_dir: Path,
+    top_n: int,
+    dpi: int,
+) -> Optional[Path]:
+    ordered_aspects = [name for name, _ in aspect_counts.most_common(top_n)]
+    if not ordered_aspects:
+        print("Not enough aspect data to build sentiment mix chart.")
+        return None
+
+    sentiments = ["positive", "negative", "mixed", "neutral"]
+    matrix = np.zeros((len(sentiments), len(ordered_aspects)))
+    for col, aspect in enumerate(ordered_aspects):
+        counts = aspect_sentiment_counts.get(aspect, {})
+        for row, category in enumerate(sentiments):
+            matrix[row, col] = counts.get(category, 0)
+
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=dpi)
+    bottom = np.zeros(len(ordered_aspects))
+    for row, sentiment in enumerate(sentiments):
+        ax.bar(
+            ordered_aspects,
+            matrix[row],
+            bottom=bottom,
+            label=sentiment.capitalize(),
+        )
+        bottom += matrix[row]
+    plt.xticks(rotation=30, ha="right")
+    ax.set_ylabel("Mentions")
+    ax.set_title("Aspect sentiment mix (top aspects)")
+    ax.legend()
+    plt.tight_layout()
+    output_path = output_dir / "aspect_sentiment_mix.png"
+    plt.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
+def plot_confidence_by_sentiment(
+    confidence_by_sentiment: Dict[str, List[float]], output_dir: Path, dpi: int
+) -> Optional[Path]:
+    filtered = [(sentiment, values) for sentiment, values in confidence_by_sentiment.items() if values]
+    if not filtered:
+        print("No confidence data available to build sentiment boxplot.")
+        return None
+
+    labels = [item[0].capitalize() for item in filtered]
+    data = [item[1] for item in filtered]
+    fig, ax = plt.subplots(figsize=(8, 4), dpi=dpi)
+    ax.boxplot(data, tick_labels=labels, showmeans=True)
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("Confidence")
+    ax.set_title("Aspect confidence by sentiment")
+    plt.tight_layout()
+    output_path = output_dir / "confidence_by_sentiment.png"
+    plt.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
+def plot_aspect_confidence_leaderboard(
+    confidence_by_aspect: Dict[str, List[float]], output_dir: Path, top_n: int, dpi: int
+) -> Optional[Path]:
+    averages = {
+        aspect: (sum(values) / len(values))
+        for aspect, values in confidence_by_aspect.items()
+        if values
+    }
+    if not averages:
+        print("No aspect confidence scores available.")
+        return None
+
+    leaderboard = sorted(averages.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+    labels = [item[0] for item in leaderboard]
+    values = [item[1] for item in leaderboard]
+
+    fig, ax = plt.subplots(figsize=(8, 4 + len(labels) * 0.2), dpi=dpi)
+    bars = ax.barh(labels, values, color="#4C72B0")
+    ax.set_xlim(0, 1)
+    ax.set_xlabel("Average confidence")
+    ax.set_title("Top aspect confidences")
+    for bar, value in zip(bars, values):
+        ax.text(value + 0.01, bar.get_y() + bar.get_height() / 2, f"{value:.2f}", va="center")
+    plt.tight_layout()
+    output_path = output_dir / "aspect_confidence_leaderboard.png"
+    plt.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate matplotlib charts from sentiment results")
     parser.add_argument("--input", default=DEFAULT_INPUT, help="sentiment_llm_results.jsonl path")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Where to save generated charts")
     parser.add_argument("--top-aspects", type=int, default=DEFAULT_TOP_ASPECTS, help="How many aspects to plot")
     parser.add_argument("--dpi", type=int, default=120, help="Chart DPI when saving")
+    parser.add_argument(
+        "--summary-json",
+        default="analysis_summary.json",
+        help="Summary JSON filename (saved inside the output directory)",
+    )
     return parser.parse_args()
 
 
@@ -143,15 +306,35 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     payloads = load_sentiment_payloads(results_path)
-    sentiment_counts, aspect_counts, _ = aggregate(payloads)
+    aggregation = aggregate(payloads)
 
     charts: List[Path] = []
-    sentiment_chart = plot_sentiment_distribution(sentiment_counts, output_dir, args.dpi)
+    sentiment_chart = plot_sentiment_distribution(aggregation.sentiment_counts, output_dir, args.dpi)
     if sentiment_chart:
         charts.append(sentiment_chart)
-    aspect_chart = plot_top_aspects(aspect_counts, output_dir, args.top_aspects, args.dpi)
+    aspect_chart = plot_top_aspects(aggregation.aspect_counts, output_dir, args.top_aspects, args.dpi)
     if aspect_chart:
         charts.append(aspect_chart)
+    mix_chart = plot_aspect_sentiment_mix(
+        aggregation.aspect_counts,
+        aggregation.aspect_sentiment_counts,
+        output_dir,
+        args.top_aspects,
+        args.dpi,
+    )
+    if mix_chart:
+        charts.append(mix_chart)
+    confidence_box = plot_confidence_by_sentiment(aggregation.confidence_by_sentiment, output_dir, args.dpi)
+    if confidence_box:
+        charts.append(confidence_box)
+    confidence_leaderboard = plot_aspect_confidence_leaderboard(
+        aggregation.confidence_by_aspect,
+        output_dir,
+        args.top_aspects,
+        args.dpi,
+    )
+    if confidence_leaderboard:
+        charts.append(confidence_leaderboard)
 
     if charts:
         print("Charts saved:")
@@ -159,6 +342,12 @@ def main() -> None:
             print(f"  - {chart_path}")
     else:
         print("No charts were generated (insufficient data).")
+
+    summary = build_summary(payloads, aggregation, args.top_aspects)
+    summary_path = output_dir / args.summary_json
+    with summary_path.open("w", encoding="utf-8") as summary_file:
+        json.dump(summary, summary_file, indent=2)
+    print(f"Summary saved to {summary_path}")
 
 
 if __name__ == "__main__":
