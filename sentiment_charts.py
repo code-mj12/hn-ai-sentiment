@@ -1,9 +1,8 @@
-"""Generate sentiment/aspect charts from OpenRouter outputs.
+"""Generate sentiment/aspect charts from unified pipeline outputs.
 
-Reads the newline-delimited JSON written by ``openrouter_sentiment_runner.py``
-(``sentiment_llm_results.jsonl`` by default), parses the model's final JSON
-response, aggregates sentiment and aspect counts, and emits a couple of helpful
-charts using matplotlib.
+Reads the newline-delimited JSON written by ``run_sentiment_analysis.py``
+(``final_sentiment_results.jsonl`` by default), aggregates sentiment and aspect
+counts, and emits a couple of helpful charts using matplotlib.
 """
 
 from __future__ import annotations
@@ -20,29 +19,10 @@ import numpy as np
 
 HN_ITEM_URL = "https://news.ycombinator.com/item?id={id}"
 
-DEFAULT_INPUT = "sentiment_llm_results.jsonl"
+# Default to the unified pipeline output
+DEFAULT_INPUT = "final_sentiment_results.jsonl"
 DEFAULT_OUTPUT_DIR = "charts"
 DEFAULT_TOP_ASPECTS = 10
-
-
-def parse_model_json(raw: Optional[str]) -> Optional[Dict]:
-    if not raw:
-        return None
-    raw = raw.strip()
-    if not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        # Attempt to salvage by trimming to the first/last braces.
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None
-        try:
-            return json.loads(raw[start : end + 1])
-        except json.JSONDecodeError:
-            return None
 
 
 def build_story_link(item_id: Optional[int]) -> Optional[str]:
@@ -51,25 +31,26 @@ def build_story_link(item_id: Optional[int]) -> Optional[str]:
     return HN_ITEM_URL.format(id=item_id)
 
 
-def load_sentiment_payloads(path: Path) -> List[Dict]:
+def load_results(path: Path) -> List[Dict]:
+    """Load unified pipeline results from ``final_sentiment_results.jsonl``."""
+
     payloads: List[Dict] = []
     if not path.exists():
         raise FileNotFoundError(f"Results file not found: {path}")
+
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
                 continue
-            record = json.loads(line)
-            parsed = parse_model_json(record.get("final_response") or record.get("initial_response"))
-            if parsed is None:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
                 continue
-            parsed["root_story_id"] = record.get("root_story_id")
-            parsed["story_id"] = record.get("story_id")
-            parsed["story_link"] = build_story_link(record.get("story_id") or record.get("root_story_id"))
-            parsed["comment_id"] = record.get("id")
-            payloads.append(parsed)
+            payloads.append(record)
+
     if not payloads:
         raise ValueError(f"No parsable sentiment payloads were found in {path}")
+
     return payloads
 
 
@@ -90,21 +71,31 @@ def aggregate(payloads: List[Dict]) -> AggregationResult:
     confidence_by_aspect: Dict[str, List[float]] = defaultdict(list)
 
     for payload in payloads:
-        sentiment = (payload.get("sentiment") or "").strip().lower()
+        sentiment = (payload.get("overall_sentiment") or "").strip().lower()
         if sentiment:
             sentiment_counts[sentiment] += 1
-        for aspect in payload.get("aspects", []) or []:
+
+        detected_aspects = payload.get("detected_aspects") or []
+        for aspect in detected_aspects:
             aspect_key = (aspect.get("aspect") or "").strip()
-            if not aspect_key or not aspect.get("present"):
+            if not aspect_key:
                 continue
             aspect_counts[aspect_key] += 1
+            confidence = aspect.get("confidence")
+            if isinstance(confidence, (int, float)):
+                confidence_by_aspect[aspect_key].append(confidence)
+
+        aspect_sentiments = payload.get("aspect_sentiments") or []
+        for aspect in aspect_sentiments:
+            aspect_key = (aspect.get("aspect") or "").strip()
             aspect_sentiment = (aspect.get("sentiment") or "").strip().lower()
-            if aspect_sentiment:
-                aspect_sentiment_counts[aspect_key][aspect_sentiment] += 1
-                confidence = aspect.get("confidence")
-                if isinstance(confidence, (int, float)):
-                    confidence_by_sentiment[aspect_sentiment].append(confidence)
-                    confidence_by_aspect[aspect_key].append(confidence)
+            if not aspect_key or not aspect_sentiment:
+                continue
+            aspect_sentiment_counts[aspect_key][aspect_sentiment] += 1
+            confidence = aspect.get("confidence")
+            if isinstance(confidence, (int, float)):
+                confidence_by_sentiment[aspect_sentiment].append(confidence)
+                confidence_by_aspect[aspect_key].append(confidence)
 
     return AggregationResult(
         sentiment_counts=sentiment_counts,
@@ -287,7 +278,7 @@ def plot_aspect_confidence_leaderboard(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate matplotlib charts from sentiment results")
-    parser.add_argument("--input", default=DEFAULT_INPUT, help="sentiment_llm_results.jsonl path")
+    parser.add_argument("--input", default=DEFAULT_INPUT, help="final_sentiment_results.jsonl path")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Where to save generated charts")
     parser.add_argument("--top-aspects", type=int, default=DEFAULT_TOP_ASPECTS, help="How many aspects to plot")
     parser.add_argument("--dpi", type=int, default=120, help="Chart DPI when saving")
@@ -305,7 +296,7 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    payloads = load_sentiment_payloads(results_path)
+    payloads = load_results(results_path)
     aggregation = aggregate(payloads)
 
     charts: List[Path] = []

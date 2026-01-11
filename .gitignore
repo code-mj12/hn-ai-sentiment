@@ -1,8 +1,15 @@
 key
 __pycache__/
 *.pyc
-old/sentiment_llm_results_*.jsonl
-hacker_news_ai_posts.csv
-hacker_news_ai_story_blobs.csv
-hacker_news_ai_threads.csv
-sentiment_llm_payload.csv
+
+# Old scripts and results
+old/
+
+# Data files
+data/
+*.csv
+*.jsonl
+*.json
+
+# Charts
+charts/
