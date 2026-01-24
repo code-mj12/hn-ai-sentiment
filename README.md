@@ -1,24 +1,21 @@
-# Hacker News AI Sentiment Analysis (Two-Stage Pipeline)
+# Hacker News AI Sentiment Analysis (Two-Stage Pipeline, v2)
 
-This repository contains a TWO-STAGE workflow for analyzing sentiment in Hacker News AI discussions:
+This repo implements a two-stage, batched LLM workflow for Hacker News AI threads:
 
-**STAGE 1: Aspect Detection**
-- Binary classification: is aspect mentioned? YES/NO
-- Extract evidence span showing where aspect appears
-- Provide confidence score (0.0-1.0)
+**Stage 1: Aspect Detection (batched, 10 per call)**
+- Detect which aspects appear and capture evidence + confidence.
+- Strict JSON array: one response per payload, no extras, no drops.
 
-**STAGE 2: Aspect Sentiment** (conditional)
-- Only run on payloads where aspects were detected
-- Classify sentiment: positive, neutral, negative, mixed
-- Provide sentiment score (-1.0 to +1.0) and reasoning
+**Stage 2: Aspect Sentiment (batched, 10 per call)**
+- For detected aspects, classify sentiment (positive/neutral/negative/mixed) + score + reasoning.
+- Also strict JSON array, aligned to the batch ordering.
 
 **Why two stages?**
-- Reduces hallucination (separate detection from classification)
-- More accurate (LLM focuses on one task at a time)
-- Efficient (skip Stage 2 for ~40-60% of payloads with no detected aspects)
-- Traceable (evidence field shows why aspect was detected)
+- Reduces hallucinations (detect then classify)
+- Skips sentiment when no aspects found (cheaper/faster)
+- Evidence gives traceability
 
-Data files (CSV shards, filtered data, payloads, results) are **intentionally gitignored**.
+Data artifacts (CSV shards, payloads, results, charts) are **gitignored** by default.
 
 ---
 
@@ -27,7 +24,7 @@ Data files (CSV shards, filtered data, payloads, results) are **intentionally gi
 | Tool | Why it is needed |
 | --- | --- |
 | Python 3.10+ | All scripts are CLI utilities written for modern Python. |
-| `pip install pandas requests matplotlib` | Core libraries: pandas for CSV processing, requests for InnKube API calls, matplotlib for visualization (optional). |
+| `pip install pandas requests matplotlib` | CSV processing, API calls, charting (optional). |
 | InnKube inference key | Save your token in a file named `key` (default path used by the inference runner). |
 | HN data CSV shards | Place `hn_stories_*.csv` files in `data/` folder (from HN data dump). |
 
@@ -51,39 +48,37 @@ All scripts live at the repo root. Commands assume you are inside `AI_lab_hacker
 
 ---
 
-## Architecture (3-File Consolidated Design)
+## Architecture (v2 Files)
 
 | File | Purpose |
 | --- | --- |
-| **fetch_and_filter_ai_posts.py** | Merge CSV shards + filter for AI keywords |
-| **prepare_sentiment_payloads.py** | Generate Stage 1 payloads (+ Stage 2 prep mode) |
-| **run_sentiment_analysis.py** | Run complete pipeline: Stage 1 → Stage 2 → Merge |
+| **fetch_and_filter_ai_posts_v2.py** | Merge CSV shards + filter for AI keywords (writes `hn_ai_filtered_v2.csv`) |
+| **prepare_sentiment_payloads_v2.py** | Generate Stage 1 payloads for v2 (`sentiment_payloads_v2.jsonl`) with 6-aspect taxonomy |
+| **run_sentiment_analysis_v2.py** | Run complete two-stage pipeline (batched 10 per call) and merge final results |
+| **sentiment_charts.py** | Generate charts from final results (optional; outputs are gitignored) |
 
 ---
 
-## Quick Start (Complete Pipeline in One Command)
+## Quick Start (v2, batched)
 
 ```bash
-# 1. Filter AI posts
-python fetch_and_filter_ai_posts.py --input-dir data --output hn_ai_filtered.csv
+# 1) Filter AI posts
+python fetch_and_filter_ai_posts_v2.py --input-dir data --output hn_ai_filtered_v2.csv
 
-# 2. Generate Stage 1 payloads
-python prepare_sentiment_payloads.py --input hn_ai_filtered.csv --output sentiment_payloads.jsonl
+# 2) Generate Stage 1 payloads (6 aspects)
+python prepare_sentiment_payloads_v2.py --input hn_ai_filtered_v2.csv --output sentiment_payloads_v2.jsonl
 
-# 3. Run COMPLETE two-stage pipeline (all in one)
-python run_sentiment_analysis.py \
-  --input sentiment_payloads.jsonl \
-  --output final_sentiment_results.jsonl \
+# 3) Run complete two-stage pipeline (batched 10 per LLM call)
+python run_sentiment_analysis_v2.py \
+  --input sentiment_payloads_v2.jsonl \
+  --output final_sentiment_results_v2.jsonl \
   --model qwen3-next-80b-a3b-instruct \
+  --batch-size 10 \
   --min-confidence 0.7 \
   --timeout 120
 ```
 
-That's it! The unified runner handles:
-- Stage 1 execution (aspect detection)
-- Stage 2 preparation (confidence filtering)
-- Stage 2 execution (aspect sentiment)
-- Result merging into final output
+The unified runner handles Stage 1, Stage 2 prep, Stage 2, and merge—now in **single batched requests** per stage (default batch size 10, no concurrency needed).
 
 ---
 
@@ -109,14 +104,14 @@ python fetch_and_filter_ai_posts.py \
 
 ---
 
-### Step 2: Prepare Payloads – `prepare_sentiment_payloads.py`
+### Step 2: Prepare Payloads – `prepare_sentiment_payloads_v2.py`
 
 #### Mode 1: Generate Stage 1 payloads (default)
 
 ```bash
-python prepare_sentiment_payloads.py \
-  --input hn_ai_filtered.csv \
-  --output sentiment_payloads.jsonl \
+python prepare_sentiment_payloads_v2.py \
+  --input hn_ai_filtered_v2.csv \
+  --output sentiment_payloads_v2.jsonl \
   --max-payloads 0
 ```
 
@@ -135,26 +130,27 @@ This mode filters Stage 1 results by confidence and generates `stage2_messages`.
 
 ---
 
-### Step 3: Run Complete Pipeline – `run_sentiment_analysis.py`
+### Step 3: Run Complete Pipeline – `run_sentiment_analysis_v2.py`
 
 Execute the full two-stage pipeline in one command:
 
 ```bash
-python run_sentiment_analysis.py \
-  --input sentiment_payloads.jsonl \
-  --output final_sentiment_results.jsonl \
+python run_sentiment_analysis_v2.py \
+  --input sentiment_payloads_v2.jsonl \
+  --output final_sentiment_results_v2.jsonl \
   --model qwen3-next-80b-a3b-instruct \
+  --batch-size 10 \
   --min-confidence 0.7 \
   --timeout 120 \
   --max-payloads 0 \
   --sleep 0.0
 ```
 
-**What this does:**
-1. **Stage 1**: Loads `stage1_messages` from input payloads, calls InnKube
-2. **Stage 2 Prep**: Filters detected aspects by confidence ≥ `--min-confidence`
-3. **Stage 2**: Calls InnKube again for aspect sentiment classification
-4. **Merge**: Combines both stages into final output
+**What this does (batched):**
+1. **Stage 1 (batched)**: Loads `stage1_messages`, sends up to `--batch-size` payloads per request, strict JSON array length check.
+2. **Stage 2 Prep**: Filters detected aspects by confidence ≥ `--min-confidence`.
+3. **Stage 2 (batched)**: Sends up to `--batch-size` payloads per request for sentiment classification, strict JSON array length check.
+4. **Merge**: Combines both stages into final output.
 
 **Options:**
 - `--input`: Input JSONL with stage1_messages
