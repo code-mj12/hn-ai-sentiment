@@ -19,8 +19,8 @@ import numpy as np
 
 HN_ITEM_URL = "https://news.ycombinator.com/item?id={id}"
 
-# Default to the unified pipeline output
-DEFAULT_INPUT = "final_sentiment_results.jsonl"
+# Default to the v2 unified pipeline output
+DEFAULT_INPUT = "final_sentiment_results_v2.jsonl"
 DEFAULT_OUTPUT_DIR = "charts"
 DEFAULT_TOP_ASPECTS = 10
 
@@ -61,6 +61,7 @@ class AggregationResult:
     aspect_sentiment_counts: Dict[str, Counter]
     confidence_by_sentiment: Dict[str, List[float]]
     confidence_by_aspect: Dict[str, List[float]]
+    aspect_sentiment_by_model: Dict[str, Dict[str, Counter]]  # {model: {aspect: Counter}}
 
 
 def aggregate(payloads: List[Dict]) -> AggregationResult:
@@ -69,11 +70,14 @@ def aggregate(payloads: List[Dict]) -> AggregationResult:
     aspect_sentiment_counts: Dict[str, Counter] = defaultdict(Counter)
     confidence_by_sentiment: Dict[str, List[float]] = defaultdict(list)
     confidence_by_aspect: Dict[str, List[float]] = defaultdict(list)
+    aspect_sentiment_by_model: Dict[str, Dict[str, Counter]] = defaultdict(lambda: defaultdict(Counter))
 
     for payload in payloads:
         sentiment = (payload.get("overall_sentiment") or "").strip().lower()
         if sentiment:
             sentiment_counts[sentiment] += 1
+
+        model = (payload.get("model") or "unknown").strip().lower()
 
         detected_aspects = payload.get("detected_aspects") or []
         for aspect in detected_aspects:
@@ -92,6 +96,8 @@ def aggregate(payloads: List[Dict]) -> AggregationResult:
             if not aspect_key or not aspect_sentiment:
                 continue
             aspect_sentiment_counts[aspect_key][aspect_sentiment] += 1
+            # Also track by model
+            aspect_sentiment_by_model[model][aspect_key][aspect_sentiment] += 1
             confidence = aspect.get("confidence")
             if isinstance(confidence, (int, float)):
                 confidence_by_sentiment[aspect_sentiment].append(confidence)
@@ -103,6 +109,7 @@ def aggregate(payloads: List[Dict]) -> AggregationResult:
         aspect_sentiment_counts=aspect_sentiment_counts,
         confidence_by_sentiment=confidence_by_sentiment,
         confidence_by_aspect=confidence_by_aspect,
+        aspect_sentiment_by_model=dict(aspect_sentiment_by_model),
     )
 
 
@@ -276,6 +283,82 @@ def plot_aspect_confidence_leaderboard(
     return output_path
 
 
+def plot_aspect_sentiment_by_model(
+    aspect_sentiment_by_model: Dict[str, Dict[str, Counter]],
+    output_dir: Path,
+    top_n: int,
+    dpi: int,
+) -> Optional[Path]:
+    """Plot average sentiment score for each aspect, broken down by model.
+    
+    aspect_sentiment_by_model: {model: {aspect: Counter of sentiments}}
+    """
+    if not aspect_sentiment_by_model:
+        return None
+    
+    # Calculate average sentiment score for each (model, aspect) pair
+    model_aspect_scores: Dict[str, Dict[str, float]] = {}
+    for model, aspect_dict in aspect_sentiment_by_model.items():
+        model_aspect_scores[model] = {}
+        for aspect, sentiment_counter in aspect_dict.items():
+            # sentiment_counter maps "positive"|"neutral"|"negative"|"mixed" -> count
+            total = sum(sentiment_counter.values())
+            if total == 0:
+                continue
+            # Score: positive=+1, neutral=0, mixed=0.5, negative=-1
+            score_map = {"positive": 1.0, "neutral": 0.0, "mixed": 0.5, "negative": -1.0}
+            weighted_score = sum(
+                score_map.get(sent, 0) * count for sent, count in sentiment_counter.items()
+            ) / total
+            model_aspect_scores[model][aspect] = weighted_score
+    
+    # Aggregate top aspects across all models
+    all_aspects = Counter()
+    for aspect_dict in model_aspect_scores.values():
+        all_aspects.update(aspect_dict.keys())
+    top_aspects = [asp for asp, _ in all_aspects.most_common(top_n)]
+    
+    if not top_aspects:
+        return None
+    
+    # Prepare data: rows=aspects, columns=models
+    models = sorted(model_aspect_scores.keys())
+    data = []
+    for aspect in top_aspects:
+        row = [model_aspect_scores[model].get(aspect, 0.0) for model in models]
+        data.append(row)
+    
+    data_array = np.array(data)
+    
+    # Create heatmap-like chart
+    fig, ax = plt.subplots(figsize=(max(6, len(models) * 1.5), max(5, len(top_aspects) * 0.4)), dpi=dpi)
+    
+    # Use imshow for heatmap
+    im = ax.imshow(data_array, cmap="RdYlGn", aspect="auto", vmin=-1, vmax=1)
+    
+    ax.set_xticks(range(len(models)))
+    ax.set_yticks(range(len(top_aspects)))
+    ax.set_xticklabels(models, rotation=45, ha="right")
+    ax.set_yticklabels(top_aspects)
+    ax.set_xlabel("Model")
+    ax.set_ylabel("Aspect")
+    ax.set_title(f"Aspect Sentiment by Model (Top {top_n})")
+    
+    # Add text annotations
+    for i in range(len(top_aspects)):
+        for j in range(len(models)):
+            value = data_array[i, j]
+            text = ax.text(j, i, f"{value:.2f}", ha="center", va="center", color="black", fontsize=9)
+    
+    plt.colorbar(im, ax=ax, label="Sentiment Score")
+    plt.tight_layout()
+    
+    output_path = output_dir / "aspect_sentiment_by_model.png"
+    plt.savefig(output_path, dpi=dpi)
+    plt.close(fig)
+    return output_path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate matplotlib charts from sentiment results")
     parser.add_argument("--input", default=DEFAULT_INPUT, help="final_sentiment_results.jsonl path")
@@ -326,6 +409,14 @@ def main() -> None:
     )
     if confidence_leaderboard:
         charts.append(confidence_leaderboard)
+    by_model_chart = plot_aspect_sentiment_by_model(
+        aggregation.aspect_sentiment_by_model,
+        output_dir,
+        args.top_aspects,
+        args.dpi,
+    )
+    if by_model_chart:
+        charts.append(by_model_chart)
 
     if charts:
         print("Charts saved:")

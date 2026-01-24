@@ -11,5 +11,29 @@ data/
 *.jsonl
 *.json
 
-# Charts
+# Charts (all variants)
 charts/
+charts_v2/
+charts_v2_tagged/
+charts_v2_tagged_by_model/
+
+# Python
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
