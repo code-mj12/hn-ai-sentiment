@@ -16,10 +16,11 @@ CSV Data → Filter AI Posts → Generate Payloads → LLM Analysis → Confiden
 
 | File | Purpose |
 |------|---------|
-| `fetch_and_filter_ai_posts_v2.py` | Merge CSV shards + filter for AI keywords → `hn_ai_filtered_v2.csv` |
-| `prepare_sentiment_payloads_v2.py` | Generate LLM payloads from filtered CSV → `sentiment_payloads_v2.jsonl` |
+| `fetch_and_filter_ai_posts_v2.py` | Load stories/comments/subcomments CSVs, filter for AI content using multi-layer scoring → `hn_ai_filtered_v2.csv` |
+| `prepare_sentiment_payloads_v2.py` | Generate LLM payloads with context (story title, parent comment) → `sentiment_payloads_v2.jsonl` |
 | `run_sentiment_analysis_v2.py` | Run batched LLM analysis (aspect + sentiment) → `final_sentiment_results_v2.jsonl` |
 | `sentiment_charts.py` | Generate visualization charts → `charts_v2/` |
+| `export_chart_data.py` | Export comprehensive JSON with all chart data + evidence → `chart_data.json` |
 | `pipeline.py` | Orchestrate full pipeline (all steps in one command) |
 
 ---
@@ -31,38 +32,56 @@ CSV Data → Filter AI Posts → Generate Payloads → LLM Analysis → Confiden
 │                           PIPELINE FLOW (V3)                                │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  1. DATA PREPARATION                                                        │
-│     ┌──────────────────┐      ┌──────────────────┐                         │
-│     │ CSV Shards       │ ──── │ Filter AI Posts  │                         │
-│     │ (hn_stories_*)   │      │ (keywords match) │                         │
-│     └──────────────────┘      └────────┬─────────┘                         │
-│                                        │                                    │
-│                                        ▼                                    │
-│                          ┌──────────────────────────┐                       │
-│                          │ hn_ai_filtered_v2.csv    │                       │
-│                          │ (stories + comments)     │                       │
-│                          └────────────┬─────────────┘                       │
-│                                       │                                     │
-│  2. PAYLOAD GENERATION                │                                     │
-│                                       ▼                                     │
-│                          ┌──────────────────────────┐                       │
-│                          │ prepare_sentiment_       │                       │
-│                          │ payloads_v2.py           │                       │
-│                          └────────────┬─────────────┘                       │
-│                                       │                                     │
-│                    ┌──────────────────┴──────────────────┐                  │
-│                    ▼                                     ▼                  │
-│          ┌─────────────────┐                   ┌─────────────────┐          │
-│          │ direct_comment  │                   │ nested_comment  │          │
-│          │ (story context) │                   │ (parent context)│          │
-│          └─────────────────┘                   └─────────────────┘          │
-│                    │                                     │                  │
-│                    └──────────────────┬──────────────────┘                  │
-│                                       ▼                                     │
-│                          ┌──────────────────────────┐                       │
-│                          │ sentiment_payloads_v2.   │                       │
-│                          │ jsonl (5,905 payloads)   │                       │
-│                          └────────────┬─────────────┘                       │
+│  1. DATA PREPARATION (fetch_and_filter_ai_posts_v2.py)                      │
+│                                                                             │
+│     ┌─────────────────────────────────────────────────┐                     │
+│     │              data/ folder                       │                     │
+│     │  ┌─────────────┐ ┌─────────────┐ ┌───────────┐  │                     │
+│     │  │ stories.csv │ │comments.csv │ │subcomments│  │                     │
+│     │  │ (HN posts)  │ │(direct cmts)│ │  .csv     │  │                     │
+│     │  └──────┬──────┘ └──────┬──────┘ └─────┬─────┘  │                     │
+│     └─────────┼───────────────┼──────────────┼────────┘                     │
+│               │               │              │                              │
+│               └───────────────┼──────────────┘                              │
+│                               ▼                                             │
+│                    ┌─────────────────────┐                                  │
+│                    │  AI Content Filter  │                                  │
+│                    │  (multi-layer score)│                                  │
+│                    │  - CORE_CONCEPTS    │                                  │
+│                    │  - AI_COMPANIES     │                                  │
+│                    │  - MODEL_NAMES      │                                  │
+│                    │  - TECHNICAL_JARGON │                                  │
+│                    └──────────┬──────────┘                                  │
+│                               ▼                                             │
+│                    ┌──────────────────────────┐                             │
+│                    │ hn_ai_filtered_v2.csv    │                             │
+│                    │ (AI-related comments     │                             │
+│                    │  with story metadata)    │                             │
+│                    └────────────┬─────────────┘                             │
+│                                 │                                           │
+│  2. PAYLOAD GENERATION (prepare_sentiment_payloads_v2.py)                   │
+│                                 ▼                                           │
+│                    ┌──────────────────────────┐                             │
+│                    │  Build LLM Payloads      │                             │
+│                    │  with Context            │                             │
+│                    └────────────┬─────────────┘                             │
+│                                 │                                           │
+│              ┌──────────────────┴──────────────────┐                        │
+│              ▼                                     ▼                        │
+│    ┌─────────────────────┐               ┌─────────────────────┐            │
+│    │   direct_comment    │               │   nested_comment    │            │
+│    │ ─────────────────── │               │ ─────────────────── │            │
+│    │ Context: story_title│               │ Context: story_title│            │
+│    │ Text: comment_text  │               │ + parent_text       │            │
+│    │                     │               │ Text: subcomment    │            │
+│    └─────────────────────┘               └─────────────────────┘            │
+│              │                                     │                        │
+│              └──────────────────┬──────────────────┘                        │
+│                                 ▼                                           │
+│                    ┌──────────────────────────┐                             │
+│                    │ sentiment_payloads_v2.   │                             │
+│                    │ jsonl                    │                             │
+│                    └────────────┬─────────────┘                             │
 │                                       │                                     │
 │  3. LLM ANALYSIS (Single Call)        │                                     │
 │                                       ▼                                     │
@@ -118,6 +137,23 @@ CSV Data → Filter AI Posts → Generate Payloads → LLM Analysis → Confiden
 
 ---
 
+## Input Data Format
+
+The pipeline expects three CSV files in the `data/` folder:
+
+| File | Description | Key Columns |
+|------|-------------|-------------|
+| `stories.csv` | Hacker News posts/stories | `story_id`, `story_title`, `story_by`, `story_url`, `story_time` |
+| `comments.csv` | Direct comments on stories | `comment_id`, `story_id`, `comment_text`, `comment_by`, `comment_time` |
+| `subcomments.csv` | Nested replies to comments | `subcomment_id`, `parent_id`, `story_id`, `subcomment_text`, `subcomment_by` |
+
+**AI Content Filter** (`fetch_and_filter_ai_posts_v2.py`):
+- Uses multi-layer scoring: `CORE_CONCEPTS`, `AI_COMPANIES`, `MODEL_NAMES`, `TECHNICAL_JARGON`, `LIBRARIES`
+- Default threshold: 5 (adjustable via `--threshold`)
+- Outputs: `hn_ai_filtered_v2.csv` with columns: `comment_id`, `comment_type`, `story_id`, `story_title`, `comment_text`, `parent_text`, `ai_score`, `match_info`
+
+---
+
 ## 6-Aspect Taxonomy
 
 | Aspect | Description | Examples |
@@ -156,11 +192,18 @@ This runs all steps automatically.
 ### Option 2: Step by Step
 
 ```bash
-# 1. Filter AI posts from CSV shards
-python fetch_and_filter_ai_posts_v2.py --input-dir data --output hn_ai_filtered_v2.csv
+# 1. Filter AI posts from source CSVs (stories.csv, comments.csv, subcomments.csv)
+python fetch_and_filter_ai_posts_v2.py \
+  --stories data/stories.csv \
+  --comments data/comments.csv \
+  --subcomments data/subcomments.csv \
+  --threshold 5 \
+  --filtered-output hn_ai_filtered_v2.csv
 
-# 2. Generate payloads
-python prepare_sentiment_payloads_v2.py --input hn_ai_filtered_v2.csv --output sentiment_payloads_v2.jsonl
+# 2. Generate LLM payloads with context (story title, parent comment)
+python prepare_sentiment_payloads_v2.py \
+  --input hn_ai_filtered_v2.csv \
+  --output sentiment_payloads_v2.jsonl
 
 # 3. Run LLM analysis (use --max-payloads for testing)
 python run_sentiment_analysis_v2.py \
@@ -172,6 +215,9 @@ python run_sentiment_analysis_v2.py \
 
 # 4. Generate charts
 python sentiment_charts.py --input final_sentiment_results_v2.jsonl --output-dir charts_v2
+
+# 5. (Optional) Export comprehensive chart data JSON
+python export_chart_data.py --input final_sentiment_results_v2.jsonl --output charts_v2/chart_data.json
 ```
 
 ---
@@ -261,14 +307,17 @@ Each record in `final_sentiment_results_v2.jsonl`:
 
 ```
 AI_lab_hacker_news/
-├── fetch_and_filter_ai_posts_v2.py   # Step 1: Filter CSV shards
-├── prepare_sentiment_payloads_v2.py  # Step 2: Generate payloads
+├── fetch_and_filter_ai_posts_v2.py   # Step 1: Load & filter CSV data for AI content
+├── prepare_sentiment_payloads_v2.py  # Step 2: Generate LLM payloads with context
 ├── run_sentiment_analysis_v2.py      # Step 3: LLM analysis (V3 optimized)
 ├── sentiment_charts.py               # Step 4: Visualization
+├── export_chart_data.py              # Export comprehensive JSON for charts
 ├── pipeline.py                       # Full pipeline orchestration
 ├── key                               # InnKube API key (gitignored)
-├── data/                             # CSV shards (gitignored)
-│   └── hn_stories_*.csv
+├── data/                             # Source CSV files (gitignored)
+│   ├── stories.csv                   # HN stories (id, title, by, url, etc.)
+│   ├── comments.csv                  # Direct comments on stories
+│   └── subcomments.csv               # Nested replies to comments
 ├── old/                              # Archived old scripts
 ├── charts_v2/                        # Generated charts (gitignored)
 └── *.jsonl                           # Data artifacts (gitignored)
@@ -280,13 +329,14 @@ AI_lab_hacker_news/
 
 | File | Description |
 |------|-------------|
-| `hn_ai_filtered_v2.csv` | Filtered AI-related posts |
-| `sentiment_payloads_v2.jsonl` | LLM input payloads (5,905 records) |
+| `hn_ai_filtered_v2.csv` | Filtered AI-related posts with scores |
+| `sentiment_payloads_v2.jsonl` | LLM input payloads with context |
 | `final_sentiment_results_v2_stage1.jsonl` | Raw LLM output |
 | `final_sentiment_results_v2_filtered.jsonl` | After confidence filter |
 | `final_sentiment_results_v2.jsonl` | Final merged results |
-| `charts_v2/*.png` | Visualization charts |
-| `charts_v2/analysis_summary.json` | Aggregated statistics |
+| `charts_v2/*.png` | Visualization charts (6 charts) |
+| `charts_v2/analysis_summary.json` | Basic aggregated statistics |
+| `charts_v2/chart_data.json` | Comprehensive JSON with all data + evidence_comments |
 
 ---
 

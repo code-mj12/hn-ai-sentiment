@@ -37,3 +37,8 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+# Chart export script
+export_chart_data.py
+
+# Test charts directory
+charts_v2_test/

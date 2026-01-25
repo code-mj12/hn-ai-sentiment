@@ -24,19 +24,19 @@ def main():
     
     # Step 1: Prepare payloads
     run_command(
-        "cd " + str(workspace) + " && python3 prepare_sentiment_payloads_v2.py --input hn_ai_filtered_v2.csv --output sentiment_payloads_v2.jsonl",
+        "cd " + str(workspace) + " && python3 prepare_sentiment_payloads_v2.py --input hn_sentiment_test_data.csv --output sentiment_payloads_v2_test.jsonl",
         "Step 1/3: Prepare sentiment payloads"
     )
     
     # Step 2: Run v2 sentiment analysis (batched)
     run_command(
-        "cd " + str(workspace) + " && python3 run_sentiment_analysis_v2.py --input sentiment_payloads_v2.jsonl --output final_sentiment_results_v2.jsonl --batch-size 10 --min-confidence 0.7",
+        "cd " + str(workspace) + " && python3 run_sentiment_analysis_v2.py --input sentiment_payloads_v2_test.jsonl --output final_sentiment_results_v2_test.jsonl --batch-size 10 --min-confidence 0.7",
         "Step 2/3: Run sentiment analysis (v2 batched)"
     )
     
     # Step 3: Generate charts
     run_command(
-        "cd " + str(workspace) + " && python3 sentiment_charts.py --input final_sentiment_results_v2.jsonl --output-dir charts_v2",
+        "cd " + str(workspace) + " && python3 sentiment_charts.py --input final_sentiment_results_v2_test.jsonl --output-dir charts_v2_test",
         "Step 3/3: Generate visualization charts"
     )
     
