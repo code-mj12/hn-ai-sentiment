@@ -62,6 +62,7 @@ class AggregationResult:
     confidence_by_sentiment: Dict[str, List[float]]
     confidence_by_aspect: Dict[str, List[float]]
     aspect_sentiment_by_model: Dict[str, Dict[str, Counter]]  # {model: {aspect: Counter}}
+    aspect_ratings_by_model: Dict[str, Dict[str, List[int]]]  # {model: {aspect: [ratings]}}
 
 
 def aggregate(payloads: List[Dict]) -> AggregationResult:
@@ -71,14 +72,12 @@ def aggregate(payloads: List[Dict]) -> AggregationResult:
     confidence_by_sentiment: Dict[str, List[float]] = defaultdict(list)
     confidence_by_aspect: Dict[str, List[float]] = defaultdict(list)
     aspect_sentiment_by_model: Dict[str, Dict[str, Counter]] = defaultdict(lambda: defaultdict(Counter))
+    aspect_ratings_by_model: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
 
     for payload in payloads:
-        sentiment = (payload.get("overall_sentiment") or "").strip().lower()
-        if sentiment:
-            sentiment_counts[sentiment] += 1
+        model = (payload.get("ai_model") or payload.get("model") or "").strip().lower() or "unknown"
 
-        model = (payload.get("model") or "unknown").strip().lower()
-
+        # Process detected aspects (V3: sentiment is inside each aspect)
         detected_aspects = payload.get("detected_aspects") or []
         for aspect in detected_aspects:
             aspect_key = (aspect.get("aspect") or "").strip()
@@ -88,20 +87,19 @@ def aggregate(payloads: List[Dict]) -> AggregationResult:
             confidence = aspect.get("confidence")
             if isinstance(confidence, (int, float)):
                 confidence_by_aspect[aspect_key].append(confidence)
+            # Collect rating for model-aspect
+            rating = aspect.get("rating")
+            if isinstance(rating, (int, float)):
+                aspect_ratings_by_model[model][aspect_key].append(int(rating))
 
-        aspect_sentiments = payload.get("aspect_sentiments") or []
-        for aspect in aspect_sentiments:
-            aspect_key = (aspect.get("aspect") or "").strip()
+            # V3: Sentiment is now inside detected_aspects (not stage2_result)
             aspect_sentiment = (aspect.get("sentiment") or "").strip().lower()
-            if not aspect_key or not aspect_sentiment:
-                continue
-            aspect_sentiment_counts[aspect_key][aspect_sentiment] += 1
-            # Also track by model
-            aspect_sentiment_by_model[model][aspect_key][aspect_sentiment] += 1
-            confidence = aspect.get("confidence")
-            if isinstance(confidence, (int, float)):
-                confidence_by_sentiment[aspect_sentiment].append(confidence)
-                confidence_by_aspect[aspect_key].append(confidence)
+            if aspect_sentiment:
+                sentiment_counts[aspect_sentiment] += 1
+                aspect_sentiment_counts[aspect_key][aspect_sentiment] += 1
+                aspect_sentiment_by_model[model][aspect_key][aspect_sentiment] += 1
+                if isinstance(confidence, (int, float)):
+                    confidence_by_sentiment[aspect_sentiment].append(confidence)
 
     return AggregationResult(
         sentiment_counts=sentiment_counts,
@@ -110,6 +108,7 @@ def aggregate(payloads: List[Dict]) -> AggregationResult:
         confidence_by_sentiment=confidence_by_sentiment,
         confidence_by_aspect=confidence_by_aspect,
         aspect_sentiment_by_model=dict(aspect_sentiment_by_model),
+        aspect_ratings_by_model=dict(aspect_ratings_by_model),
     )
 
 
@@ -285,76 +284,132 @@ def plot_aspect_confidence_leaderboard(
 
 def plot_aspect_sentiment_by_model(
     aspect_sentiment_by_model: Dict[str, Dict[str, Counter]],
+    aspect_ratings_by_model: Dict[str, Dict[str, List[int]]],
     output_dir: Path,
     top_n: int,
     dpi: int,
+    min_model_count: int = 10,
 ) -> Optional[Path]:
-    """Plot average sentiment score for each aspect, broken down by model.
-    
+    """Plot detailed model analysis with sentiment and aspect ratings.
+
     aspect_sentiment_by_model: {model: {aspect: Counter of sentiments}}
+    aspect_ratings_by_model: {model: {aspect: [ratings]}}
+    min_model_count: Only show models with at least this many mentions
     """
     if not aspect_sentiment_by_model:
         return None
-    
-    # Calculate average sentiment score for each (model, aspect) pair
-    model_aspect_scores: Dict[str, Dict[str, float]] = {}
+
+    # Count total mentions per model, sentiment totals
+    model_sentiment_totals: Dict[str, Counter] = {}
+    model_total_counts: Dict[str, int] = {}
+
     for model, aspect_dict in aspect_sentiment_by_model.items():
-        model_aspect_scores[model] = {}
-        for aspect, sentiment_counter in aspect_dict.items():
-            # sentiment_counter maps "positive"|"neutral"|"negative"|"mixed" -> count
-            total = sum(sentiment_counter.values())
-            if total == 0:
-                continue
-            # Score: positive=+1, neutral=0, mixed=0.5, negative=-1
-            score_map = {"positive": 1.0, "neutral": 0.0, "mixed": 0.5, "negative": -1.0}
-            weighted_score = sum(
-                score_map.get(sent, 0) * count for sent, count in sentiment_counter.items()
-            ) / total
-            model_aspect_scores[model][aspect] = weighted_score
-    
-    # Aggregate top aspects across all models
-    all_aspects = Counter()
-    for aspect_dict in model_aspect_scores.values():
-        all_aspects.update(aspect_dict.keys())
-    top_aspects = [asp for asp, _ in all_aspects.most_common(top_n)]
-    
-    if not top_aspects:
+        # Skip "unknown" model
+        if model == "unknown":
+            continue
+        sentiment_counter: Counter = Counter()
+        for aspect, sent_counts in aspect_dict.items():
+            sentiment_counter.update(sent_counts)
+        total = sum(sentiment_counter.values())
+        if total >= min_model_count:
+            model_sentiment_totals[model] = sentiment_counter
+            model_total_counts[model] = total
+
+    if not model_sentiment_totals:
+        print(f"No models (excluding 'unknown') with >= {min_model_count} mentions for chart.")
         return None
-    
-    # Prepare data: rows=aspects, columns=models
-    models = sorted(model_aspect_scores.keys())
-    data = []
-    for aspect in top_aspects:
-        row = [model_aspect_scores[model].get(aspect, 0.0) for model in models]
-        data.append(row)
-    
-    data_array = np.array(data)
-    
-    # Create heatmap-like chart
-    fig, ax = plt.subplots(figsize=(max(6, len(models) * 1.5), max(5, len(top_aspects) * 0.4)), dpi=dpi)
-    
-    # Use imshow for heatmap
-    im = ax.imshow(data_array, cmap="RdYlGn", aspect="auto", vmin=-1, vmax=1)
-    
-    ax.set_xticks(range(len(models)))
-    ax.set_yticks(range(len(top_aspects)))
-    ax.set_xticklabels(models, rotation=45, ha="right")
-    ax.set_yticklabels(top_aspects)
-    ax.set_xlabel("Model")
-    ax.set_ylabel("Aspect")
-    ax.set_title(f"Aspect Sentiment by Model (Top {top_n})")
-    
-    # Add text annotations
-    for i in range(len(top_aspects)):
-        for j in range(len(models)):
-            value = data_array[i, j]
-            text = ax.text(j, i, f"{value:.2f}", ha="center", va="center", color="black", fontsize=9)
-    
-    plt.colorbar(im, ax=ax, label="Sentiment Score")
+
+    # Sort models by total count (descending)
+    sorted_models = sorted(
+        model_total_counts.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+    models = [m for m, _ in sorted_models]
+
+    if not models:
+        return None
+
+    # Create figure with 2 subplots: sentiment bars + aspect ratings heatmap
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), dpi=dpi,
+                                    gridspec_kw={'width_ratios': [1.2, 1]})
+
+    # === LEFT: Sentiment grouped bar chart ===
+    sentiments = ["positive", "negative", "neutral", "mixed"]
+    colors = {"positive": "#2ecc71", "negative": "#e74c3c", "neutral": "#95a5a6", "mixed": "#f39c12"}
+
+    data = {sent: [] for sent in sentiments}
+    for model in models:
+        counter = model_sentiment_totals[model]
+        total = sum(counter.values())
+        for sent in sentiments:
+            pct = (counter.get(sent, 0) / total * 100) if total > 0 else 0
+            data[sent].append(pct)
+
+    x = np.arange(len(models))
+    width = 0.2
+
+    for i, sent in enumerate(sentiments):
+        offset = (i - 1.5) * width
+        bars = ax1.bar(x + offset, data[sent], width, label=sent.capitalize(), color=colors[sent])
+        for bar, val in zip(bars, data[sent]):
+            if val > 8:
+                ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                        f'{val:.0f}%', ha='center', va='bottom', fontsize=8)
+
+    model_labels = [f"{m}\n(n={model_total_counts[m]})" for m in models]
+    ax1.set_ylabel('Percentage (%)')
+    ax1.set_xlabel('AI Model')
+    ax1.set_title('Sentiment Distribution by Model')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(model_labels, rotation=25, ha='right')
+    ax1.legend(loc='upper right', fontsize=8)
+    ax1.set_ylim(0, 100)
+    ax1.grid(axis='y', linestyle='--', alpha=0.3)
+
+    # === RIGHT: Aspect RATINGS heatmap per model (1-5 scale) ===
+    all_aspects = ["coding_speed", "coding_performance", "cost_price", "ethics", "innovation", "skepticism_hype"]
+
+    # Build heatmap data (average rating per aspect per model)
+    heatmap_data = []
+    for model in models:
+        model_ratings = aspect_ratings_by_model.get(model, {})
+        row = []
+        for asp in all_aspects:
+            ratings = model_ratings.get(asp, [])
+            avg_rating = sum(ratings) / len(ratings) if ratings else 0
+            row.append(avg_rating)
+        heatmap_data.append(row)
+
+    heatmap_array = np.array(heatmap_data)
+
+    # Use RdYlGn colormap: red=low rating, green=high rating
+    im = ax2.imshow(heatmap_array, cmap="RdYlGn", aspect="auto", vmin=1, vmax=5)
+
+    ax2.set_xticks(range(len(all_aspects)))
+    ax2.set_yticks(range(len(models)))
+    ax2.set_xticklabels([a.replace("_", "\n") for a in all_aspects], rotation=0, ha='center', fontsize=8)
+    ax2.set_yticklabels(models)
+    ax2.set_xlabel('Aspect')
+    ax2.set_title('Avg Aspect Rating by Model (1-5)')
+
+    # Add rating annotations
+    for i in range(len(models)):
+        for j in range(len(all_aspects)):
+            val = heatmap_array[i, j]
+            if val > 0:
+                color = "white" if val < 2.5 or val > 4 else "black"
+                ax2.text(j, i, f"{val:.1f}", ha="center", va="center", color=color, fontsize=9, fontweight='bold')
+
+    cbar = plt.colorbar(im, ax=ax2, label="Rating (1=Poor, 5=Excellent)", shrink=0.8)
+    cbar.set_ticks([1, 2, 3, 4, 5])
+
+    plt.suptitle(f'AI Model Analysis (min {min_model_count} mentions, excluding "unknown")',
+                 fontsize=12, fontweight='bold', y=1.02)
     plt.tight_layout()
-    
+
     output_path = output_dir / "aspect_sentiment_by_model.png"
-    plt.savefig(output_path, dpi=dpi)
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
     plt.close(fig)
     return output_path
 
@@ -411,6 +466,7 @@ def main() -> None:
         charts.append(confidence_leaderboard)
     by_model_chart = plot_aspect_sentiment_by_model(
         aggregation.aspect_sentiment_by_model,
+        aggregation.aspect_ratings_by_model,
         output_dir,
         args.top_aspects,
         args.dpi,
